@@ -10,99 +10,24 @@ augmentation-free pipeline used for validation/test/inference
 pipeline to one dataset example while keeping bounding boxes in
 sync with the transformed image.
 
-PURPOSE
--------
-Augmentation must match deployment reality (docs/SDP.md Day 5) — a
-shelf camera never sees an upside-down shelf, so vertical flips are
-deliberately excluded below, even though many generic augmentation
-tutorials include them by default. Blindly copying a generic
-augmentation recipe without this kind of domain judgment is exactly
-the "tutorial project" energy this whole build is trying to avoid.
-
 ARCHITECTURE NOTES
 -------------------
-    • get_eval_transforms() is implemented for you — it's
-      deterministic (resize only) and there's no meaningful design
-      decision left to make once you've decided on image_size.
-    • get_train_transforms() is NOT implemented — choosing which
-      augmentations to include (and which to deliberately exclude,
-      like vertical flips) is a real design decision, not
-      boilerplate.
-    • apply_transforms() is the bridge between an Albumentations
-      Compose object and a single Hugging Face dataset example — it
-      must keep image and bounding boxes transformed together
-      (Albumentations handles this natively via its
-      bbox_params argument, but wiring it into a dataset.map()-
-      compatible function is your job).
-
-ASCII FLOW DIAGRAM
--------------------
-    dataset example (image, boxes, labels)
-            |
-            v
-    apply_transforms(example, transforms)   <- YOU implement this
-            |   (transforms is either get_train_transforms() output,
-            |    applied ONLY to the train split, or
-            |    get_eval_transforms() output, applied to val/test)
-            v
-    transformed example (image, boxes, labels — boxes remapped to
-    match the transformed image)
-            |
-            v
-    (fed into src/data/preprocessing.py's preprocess_batch())
-
-TODO
-----
-    - [ ] Implement get_train_transforms(image_size):
-          Recommended starting recipe (confirm/adjust after looking
-          at your own EDA from Day 3):
-              - A.Resize(image_size, image_size)
-              - A.HorizontalFlip(p=0.5)
-              - A.RandomBrightnessContrast(p=0.3)
-              - A.Compose(..., bbox_params=A.BboxParams(format="coco", label_fields=["labels"]))
-          Deliberately EXCLUDE A.VerticalFlip — shelves are never
-          viewed upside-down in production (docs/SDP.md Day 5).
-    - [ ] Implement apply_transforms(example, transforms):
-          1. Extract image (as a numpy array) and boxes/labels from
-             the example
-          2. Call transforms(image=..., bboxes=..., labels=...)
-          3. Reassemble the transformed image + boxes back into the
-             example's expected shape
-
-HINTS
------
-    - Albumentations expects bboxes as a list of tuples/lists, with
-      labels passed as a SEPARATE list_field (via
-      label_fields=["labels"] in BboxParams) — mixing labels
-      directly into each bbox tuple is a common early mistake.
-    - Test apply_transforms() on a single example first and
-      visually plot the result (reuse src/utils/visualization.py
-      once implemented) before wiring it into a full dataset.map()
-      call.
-
-COMMON MISTAKES
-----------------
-    - Applying get_train_transforms() to the validation/test split —
-      this contaminates your evaluation metrics with augmentation
-      noise and makes results non-reproducible run to run.
-    - Forgetting bbox_params entirely, which silently leaves boxes
-      untransformed while the image itself IS transformed —
-      producing misaligned boxes that are hard to notice without
-      explicitly visualizing them.
-
-BEST PRACTICES
----------------
-    - Keep the augmentation recipe itself simple at first (2-3
-      transforms) and only add more if error analysis (Day 10) shows
-      a specific failure mode augmentation could plausibly address —
-      resist "augmentation kitchen-sink" syndrome.
-
-LEARNING NOTES
---------------
-get_eval_transforms() below shows the minimal, deterministic-only
-pattern; get_train_transforms() should follow the same
-Albumentations Compose + BboxParams structure, just with additional
-randomized transforms added.
+    • get_eval_transforms() only resizes — no geometry-changing
+      randomness, so boxes never need to be dropped or clipped.
+    • get_train_transforms() deliberately excludes A.VerticalFlip —
+      a shelf camera never sees an upside-down shelf in production
+      (docs/SDP.md Day 5). It also deliberately excludes any
+      CROPPING transform (e.g. RandomCrop) for now — cropping can
+      cut a box partially or fully out of frame, which would require
+      min_visibility/min_area handling in BboxParams that the
+      current simple recipe (resize/flip/brightness) doesn't need,
+      since none of those three transforms can push a box out of
+      frame. If you add a crop-based transform later, revisit this.
+    • apply_transforms() operates on ONE example at a time (not
+      batched) — wire it in via dataset.map(apply_transforms,
+      fn_kwargs={"transforms": ...}) WITHOUT batched=True, since
+      Albumentations' Compose call signature expects a single
+      image/bboxes/labels triple, not a batch of them.
 
 REFERENCES
 ----------
@@ -110,6 +35,9 @@ REFERENCES
 """
 
 from typing import Any
+
+import numpy as np
+from PIL import Image
 
 
 def get_eval_transforms(image_size: int) -> Any:
@@ -142,31 +70,101 @@ def get_train_transforms(image_size: int) -> Any:
 
     Returns:
         An albumentations.Compose pipeline including randomized
-        augmentations appropriate for shelf imagery. Must NOT
-        include vertical flips (see this file's module docstring for
-        why) and must transform bounding boxes in sync with the
-        image.
-
-    Raises:
-        NotImplementedError: Always, until implemented.
+        augmentations appropriate for shelf imagery. Deliberately
+        excludes vertical flips (shelves are never viewed upside
+        down) and any cropping transform (see this file's module
+        docstring). Transforms bounding boxes in sync with the image
+        via bbox_params.
     """
-    raise NotImplementedError("get_train_transforms() is not implemented yet")
+    import albumentations as A
+
+    return A.Compose(
+        [
+            A.Resize(image_size, image_size),
+            A.HorizontalFlip(p=0.5),
+            A.RandomBrightnessContrast(p=0.3),
+        ],
+        bbox_params=A.BboxParams(format="coco", label_fields=["labels"]),
+    )
 
 
 def apply_transforms(example: dict, transforms: Any) -> dict:
     """Apply an Albumentations pipeline to a single dataset example.
 
     Args:
-        example: A raw dataset example containing at least an image
-            and its bounding boxes/labels.
+        example: A raw dataset example with "image" (a PIL.Image,
+            as lazily decoded by src/data/dataset.py's Image()-cast
+            column), "image_id", and "annotations" (a list of
+            {"bbox": [x, y, w, h], "category_id": int} dicts, in the
+            schema produced by src/data/dataset.py's load_split()).
         transforms: An albumentations.Compose pipeline, as returned
             by get_train_transforms() or get_eval_transforms().
 
     Returns:
-        A new example dict with the image and boxes/labels
-        consistently transformed together.
+        A new example dict with the same keys as the input, but with
+        "image" replaced by the transformed PIL.Image and
+        "annotations" replaced by boxes remapped to match the
+        transformed image. Examples with zero annotations are
+        handled correctly (an empty list in, an empty list out) —
+        a fully-stocked or fully-empty shelf photo is a legitimate
+        input either way.
 
     Raises:
-        NotImplementedError: Always, until implemented.
+        ValueError: If any annotation is missing "bbox" or
+            "category_id" — this should never happen for data that
+            passed through src/data/dataset.py's load_split(), so a
+            failure here indicates apply_transforms was called on
+            data that bypassed that validation step.
     """
-    raise NotImplementedError("apply_transforms() is not implemented yet")
+    # ------------------------------------------------------------------
+    # Step 1: Albumentations works on numpy arrays, not PIL Images.
+    # Force RGB explicitly (same convention as src/utils/io.py's
+    # load_image()) — some source images are grayscale or RGBA, and
+    # silently mixing image modes through the pipeline is a classic
+    # subtle bug.
+    # ------------------------------------------------------------------
+    image = example["image"]
+    image_np = np.array(image.convert("RGB"))
+
+    # ------------------------------------------------------------------
+    # Step 2: Split this project's {"bbox": ..., "category_id": ...}
+    # annotation dicts into the two SEPARATE parallel lists
+    # Albumentations requires: `bboxes` and `labels` (tied together
+    # only by matching list position, per bbox_params(label_fields=
+    # ["labels"]) in get_train_transforms/get_eval_transforms above).
+    # ------------------------------------------------------------------
+    try:
+        bboxes = [ann["bbox"] for ann in example["annotations"]]
+        labels = [ann["category_id"] for ann in example["annotations"]]
+    except KeyError as exc:
+        raise ValueError(
+            f"Malformed annotation for image_id={example.get('image_id')}: "
+            f"missing key {exc}. Expected annotations already validated by "
+            f"src/data/dataset.py's load_split()."
+        ) from exc
+
+    # ------------------------------------------------------------------
+    # Step 3: Call the pipeline. Albumentations moves the boxes
+    # automatically to match whatever happened to the image (resize,
+    # flip, etc.) — this is the one line doing the actual "work."
+    # ------------------------------------------------------------------
+    transformed = transforms(image=image_np, bboxes=bboxes, labels=labels)
+
+    # ------------------------------------------------------------------
+    # Step 4: Reassemble the result back into this project's schema.
+    # Convert the transformed numpy array back to a PIL.Image so the
+    # "image" field's TYPE stays consistent with what
+    # src/data/dataset.py produces and src/data/preprocessing.py
+    # expects — nothing downstream should need to know augmentation
+    # happened at all.
+    # ------------------------------------------------------------------
+    transformed_image = Image.fromarray(transformed["image"])
+    transformed_annotations = [
+        {"bbox": list(bbox), "category_id": int(label)}
+        for bbox, label in zip(transformed["bboxes"], transformed["labels"])
+    ]
+
+    result = dict(example)
+    result["image"] = transformed_image
+    result["annotations"] = transformed_annotations
+    return result

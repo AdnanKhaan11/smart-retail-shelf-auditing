@@ -1,0 +1,99 @@
+# ====================================================================
+# Dockerfile.frontend
+# ====================================================================
+#
+# RESPONSIBILITY
+# --------------
+# Builds a container image that runs the Gradio demo UI
+# (frontend/app.py). This image contains NO model code and NO model
+# weights — it only needs enough to call the backend's REST API over
+# the network (see frontend/app.py's module docstring for why the
+# frontend must never import inference code directly).
+#
+# PURPOSE
+# -------
+# Keeping this a genuinely separate, lightweight image (rather than
+# bundling frontend and backend into one container) is what makes
+# docs/SDP.md Section 12's deployment pipeline actually modular — you
+# could, for example, deploy this exact image to Hugging Face Spaces
+# independently of where the backend runs, by just changing the
+# BACKEND_URL environment variable.
+#
+# ARCHITECTURE NOTES
+# -------------------
+#   - This image only copies frontend/ — it has no dependency on
+#     backend/ or src/ at all, which is a good sign the
+#     frontend/backend separation (see frontend/app.py's docstring)
+#     is actually being respected here, not just in principle.
+#   - BACKEND_URL is read from an environment variable at runtime
+#     (frontend/app.py already does this — see that file), NOT
+#     baked into the image at build time, so the same image works
+#     whether the backend is a docker-compose service, a separate
+#     deployed URL, or localhost during development.
+#
+# ASCII FLOW DIAGRAM
+# -------------------
+#     docker build -f docker/Dockerfile.frontend -t retail-frontend .
+#             |
+#             v
+#     base image (python:3.11-slim)
+#             |
+#             v
+#     COPY requirements.txt -> pip install    (cached layer)
+#             |
+#             v
+#     COPY frontend/                          (invalidated on code change)
+#             |
+#             v
+#     CMD python -m frontend.app
+#             |
+#             v
+#     (reads BACKEND_URL from environment at container start,
+#      set by docker-compose.yml to http://backend:8000)
+#
+# TODO
+# ----
+#   - [ ] Add a HEALTHCHECK instruction (Gradio serves a root page
+#         you can curl) — same reasoning as Dockerfile.backend's
+#         equivalent TODO.
+#   - [ ] Consider whether this image needs the FULL project
+#         requirements.txt or whether frontend/ has few enough
+#         dependencies (gradio, requests, Pillow) to warrant its own
+#         smaller requirements-frontend.txt for a leaner image — a
+#         reasonable simplification either way; document whichever
+#         you choose.
+#
+# COMMON MISTAKES
+# ----------------
+#   - Hardcoding BACKEND_URL to "http://localhost:8000" inside this
+#     Dockerfile with an ENV instruction — this breaks the moment
+#     the frontend and backend run in separate containers (localhost
+#     inside the frontend container is NOT the backend container).
+#     Let docker-compose.yml set this per-environment instead (see
+#     that file).
+#
+# BEST PRACTICES
+# ---------------
+#   - Keep this image genuinely minimal — if you find yourself
+#     needing to COPY src/ or backend/ into this image, that's a
+#     sign some logic has leaked into frontend/ that shouldn't be
+#     there (see frontend/app.py's Common Mistakes section).
+#
+# REFERENCES
+# ----------
+#   - https://www.gradio.app/guides/deploying-gradio-with-docker
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY frontend/ ./frontend/
+
+EXPOSE 7860
+
+# TODO: add a HEALTHCHECK instruction here (see TODO section above)
+
+CMD ["python", "-m", "frontend.app"]

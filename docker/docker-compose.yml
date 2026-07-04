@@ -1,0 +1,123 @@
+# ====================================================================
+# docker-compose.yml
+# ====================================================================
+#
+# RESPONSIBILITY
+# --------------
+# Runs the backend and frontend containers together as one system,
+# with the correct network wiring, volume mounts, and startup
+# ordering between them. This is what docs/SDP.md Day 14's
+# deliverable ("docker-compose up successfully runs the full system
+# from a clean clone") actually means in practice.
+#
+# PURPOSE
+# -------
+# A single `docker-compose up` from a fresh `git clone` is the
+# strongest, most concrete proof of NFR-5 ("the project must be
+# reproducible") you can offer a reviewer — it removes "but does it
+# actually run?" as a question entirely.
+#
+# ARCHITECTURE NOTES
+# -------------------
+#   - Build context is set to the PROJECT ROOT ("../" relative to
+#     this file's location in docker/), not docker/ itself, because
+#     both Dockerfiles COPY from backend/, src/, frontend/, and
+#     configs/ — all of which live at the project root, not inside
+#     docker/.
+#   - models/ and configs/ are mounted as READ-ONLY volumes into the
+#     backend container at runtime, rather than being baked into the
+#     image at build time (see Dockerfile.backend's Architecture
+#     Notes for why) — this means updating your trained checkpoint
+#     or tuning a threshold in inference_config.yaml does NOT require
+#     rebuilding the backend image, only restarting the container.
+#   - frontend depends_on backend, with BACKEND_URL pointing at the
+#     Docker Compose SERVICE NAME "backend" (Compose's built-in DNS
+#     resolves service names to the right container automatically),
+#     not "localhost" — this is the single most common docker-compose
+#     networking mistake for a two-service app like this one.
+#
+# ASCII FLOW DIAGRAM
+# -------------------
+#     docker-compose up
+#             |
+#             v
+#     backend service   (builds Dockerfile.backend, port 8000,
+#                         mounts ./models and ./configs read-only)
+#             |
+#             v  (frontend waits for backend to start)
+#     frontend service  (builds Dockerfile.frontend, port 7860,
+#                         BACKEND_URL=http://backend:8000)
+#             |
+#             v
+#     Visit http://localhost:7860 in a browser -> Gradio UI ->
+#     calls http://backend:8000 internally (container-to-container,
+#     via Compose's internal network) -> full system running
+#
+# TODO
+# ----
+#   - [ ] Once Dockerfile.backend has a HEALTHCHECK (see that file's
+#         TODO), add `condition: service_healthy` under frontend's
+#         depends_on here, so frontend genuinely waits for the
+#         backend to be READY, not just STARTED (a container can be
+#         "started" while FastAPI/uvicorn and model loading are still
+#         in progress).
+#   - [ ] If you export your trained model to ONNX
+#         (docs/SDP.md Section 12), confirm the models volume mount
+#         below actually includes models/exported/, not just
+#         models/checkpoints/ — adjust the volume path if your
+#         inference_config.yaml's model_path points there instead.
+#
+# HINTS
+# -----
+#   - `docker-compose logs -f backend` is your first debugging step
+#     if the frontend can't reach the backend — confirm the backend
+#     actually started successfully and is listening on 0.0.0.0, not
+#     127.0.0.1 (binding to 127.0.0.1 inside a container makes it
+#     unreachable from OTHER containers, including frontend).
+#
+# COMMON MISTAKES
+# ----------------
+#   - Setting BACKEND_URL to "http://localhost:8000" here instead of
+#     "http://backend:8000" — see Architecture Notes above; this is
+#     the single most common bug when moving a two-service app from
+#     "runs locally" to "runs in Compose."
+#
+# BEST PRACTICES
+# ---------------
+#   - Run `docker-compose up --build` (not just `up`) after any code
+#     change, to force image rebuilds — `up` alone will happily reuse
+#     a stale cached image if you forget the --build flag.
+#
+# REFERENCES
+# ----------
+#   - https://docs.docker.com/compose/compose-file/
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../models:/app/models:ro
+      - ../configs:/app/configs:ro
+    # TODO: add a healthcheck here once Dockerfile.backend has one
+    #   healthcheck:
+    #     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    #     interval: 10s
+    #     timeout: 5s
+    #     retries: 5
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    ports:
+      - "7860:7860"
+    environment:
+      # NOTE: "backend" here is the Compose SERVICE NAME above, not
+      # "localhost" — see Architecture Notes for why this matters.
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend

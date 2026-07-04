@@ -1,0 +1,25 @@
+# --- Core ML / training ---
+torch>=2.2.0
+transformers>=4.44.0
+datasets>=2.20.0
+albumentations>=1.4.0
+torchmetrics>=1.4.0
+pillow>=10.3.0
+numpy>=1.26.0
+matplotlib>=3.8.0
+huggingface_hub>=0.24.0
+pyyaml>=6.0.1
+
+# --- Backend / serving ---
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+python-multipart>=0.0.9
+opencv-python-headless>=4.10.0
+
+# --- Frontend ---
+gradio>=4.40.0
+requests>=2.32.0
+
+# --- Environment management ---
+python-dotenv>=1.0.1

@@ -10,77 +10,19 @@ build_dataloader() convenience wrapper around torch.utils.data.DataLoader
 for any standalone (non-Trainer) usage, such as quick manual sanity
 checks or a custom eval loop.
 
-PURPOSE
--------
-docs/SDP.md Day 6's explicit deliverable is sanity-checking one full
-batch by loading and plotting it — this file is what that batch
-comes from. Getting the collate function right here is what prevents
-a confusing shape-mismatch error deep inside model.forward() later.
-
 ARCHITECTURE NOTES
 -------------------
     • If you use the Hugging Face Trainer (the recommended path per
       docs/SDP.md Section 8), you pass collate_fn to Trainer's
       `data_collator` argument — you do NOT need to manually
       construct a DataLoader yourself for training. build_dataloader()
-      here exists for the cases OUTSIDE the Trainer: quick manual
-      batch inspection (Day 6), or a custom evaluation loop in
-      src/eval/evaluate.py if you choose not to rely solely on
-      Trainer's built-in evaluation.
-    • pixel_values (fixed-size, per docs/SDP.md's image_size config)
-      can be stacked into a single tensor via default collation.
-      labels (variable number of boxes per image) CANNOT — they must
-      be collected into a plain Python list, one dict per image, not
-      stacked into a tensor.
-
-ASCII FLOW DIAGRAM
--------------------
-    list[preprocessed example]   (from src/data/preprocessing.py)
-            |
-            v
-    collate_fn(batch)             <- YOU implement this
-            |   pixel_values: stack into one tensor
-            |   labels: keep as a list of per-image dicts
-            v
-    {"pixel_values": Tensor[B, C, H, W], "labels": [dict, dict, ...]}
-
-TODO
-----
-    - [ ] Implement collate_fn(batch):
-          1. torch.stack() the "pixel_values" field across the batch
-          2. Leave "labels" as a plain list (one entry per example,
-             each entry itself a dict with "boxes" and
-             "class_labels" — do NOT try to stack this into a
-             tensor, the whole point is that it's variable-length)
-          3. Return {"pixel_values": ..., "labels": ...}
-
-HINTS
------
-    - This is one of the most commonly mismatched pieces of a
-      DETR-family training pipeline — if you hit a shape error
-      inside model.forward(), check this function first before
-      assuming the bug is in preprocessing.py.
-
-COMMON MISTAKES
-----------------
-    - Trying to torch.stack() the labels field — this will fail (or
-      worse, silently produce garbage if box counts happen to match
-      across a batch by coincidence) because it is fundamentally
-      variable-length data.
-
-BEST PRACTICES
----------------
-    - Write a tiny unit test that constructs 2-3 fake preprocessed
-      examples with DIFFERENT numbers of boxes each and asserts
-      collate_fn() doesn't raise and produces the expected shape —
-      this is a fast, valuable test to have in
-      tests/test_preprocessing.py.
-
-LEARNING NOTES
---------------
-build_dataloader() below is fully implemented as a thin, generic
-wrapper — the real learning value in this file is entirely in
-getting collate_fn() correct.
+      exists for cases OUTSIDE the Trainer only.
+    • pixel_values (fixed-size, per configs/training_config.yaml's
+      image_size) is stacked into a single batched tensor.
+      labels (variable number of boxes per image) is deliberately
+      LEFT as a plain Python list, one dict per image — never
+      stacked, never padded. This is the one thing this file exists
+      to get right.
 
 REFERENCES
 ----------
@@ -90,23 +32,50 @@ REFERENCES
 
 from typing import Any
 
+import torch
+
 
 def collate_fn(batch: list[dict]) -> dict:
     """Collate a list of preprocessed examples into one training batch.
 
     Args:
         batch: A list of preprocessed example dicts, each with
-            "pixel_values" (a fixed-shape tensor) and "labels" (a
-            dict describing that image's boxes/classes).
+            "pixel_values" (a fixed-shape [C, H, W] tensor, produced
+            by src/data/preprocessing.py's preprocess_batch via
+            AutoImageProcessor) and "labels" (a dict with "boxes",
+            "class_labels", and related fields for that one image).
 
     Returns:
-        A single dict with "pixel_values" stacked into one batched
-        tensor and "labels" left as a plain list of per-image dicts.
+        A single dict with "pixel_values" stacked into one
+        [batch_size, C, H, W] tensor, and "labels" left as a plain
+        list of per-image dicts, in the same order as the input batch.
 
     Raises:
-        NotImplementedError: Always, until implemented.
+        ValueError: If `batch` is empty, or if the examples'
+            "pixel_values" tensors don't all share the same shape
+            (which would indicate a bug upstream in preprocessing —
+            every image should already be resized to a consistent
+            size before reaching this function).
     """
-    raise NotImplementedError("collate_fn() is not implemented yet")
+    if len(batch) == 0:
+        raise ValueError("collate_fn() received an empty batch — nothing to collate.")
+
+    pixel_values = [torch.as_tensor(item["pixel_values"]) for item in batch]
+
+    first_shape = pixel_values[0].shape
+    for i, tensor in enumerate(pixel_values):
+        if tensor.shape != first_shape:
+            raise ValueError(
+                f"Inconsistent pixel_values shapes in batch: example 0 has shape "
+                f"{first_shape}, example {i} has shape {tensor.shape}. All images "
+                f"should already be resized to the same size by "
+                f"src/data/preprocessing.py — this indicates a bug upstream, not here."
+            )
+
+    return {
+        "pixel_values": torch.stack(pixel_values),
+        "labels": [item["labels"] for item in batch],
+    }
 
 
 def build_dataloader(dataset: Any, batch_size: int, shuffle: bool) -> Any:
@@ -116,8 +85,7 @@ def build_dataloader(dataset: Any, batch_size: int, shuffle: bool) -> Any:
     the Hugging Face Trainer does not use this function directly; it
     builds its own internal DataLoader using the collate_fn you pass
     to TrainingArguments/Trainer instead. Use this function for
-    manual batch inspection (docs/SDP.md Day 6) or a custom eval
-    loop only.
+    manual batch inspection or a custom eval loop only.
 
     Args:
         dataset: A preprocessed dataset (torch-compatible).
@@ -130,4 +98,6 @@ def build_dataloader(dataset: Any, batch_size: int, shuffle: bool) -> Any:
     """
     from torch.utils.data import DataLoader
 
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+    return DataLoader(
+        dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn
+    )

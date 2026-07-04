@@ -1,0 +1,27 @@
+[project]
+name = "smart-retail-shelf-auditing"
+version = "0.1.0"
+description = "Add your description"
+author = "adnan khan"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "albumentations>=1.4.0",
+    "datasets>=2.20.0",
+    "fastapi>=0.111.0",
+    "gradio>=4.40.0",
+    "huggingface-hub>=0.24.0",
+    "matplotlib>=3.8.0",
+    "numpy>=1.26.0",
+    "opencv-python-headless>=4.10.0",
+    "pillow>=10.3.0",
+    "pydantic>=2.7.0",
+    "python-dotenv>=1.0.1",
+    "python-multipart>=0.0.9",
+    "pyyaml>=6.0.1",
+    "requests>=2.32.0",
+    "torch>=2.2.0",
+    "torchmetrics>=1.4.0",
+    "transformers>=4.44.0",
+    "uvicorn[standard]>=0.30.0",
+]

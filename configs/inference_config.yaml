@@ -1,77 +1,98 @@
-# ====================================================================
-# inference_config.yaml
-# ====================================================================
+# ============================================================================
+# RT-DETR Inference Configuration
+# ============================================================================
 #
-# RESPONSIBILITY
-# --------------
-# Single source of truth for runtime inference/serving settings:
-# which model checkpoint to load, what confidence threshold counts
-# as a valid detection, and what the business logic in
-# backend/services/inventory.py should treat as "low stock." This
-# file is read at APPLICATION STARTUP by backend/main.py's lifespan
-# handler (once its TODO is implemented) — NOT at training time.
+# This file contains every runtime setting used during inference.
+# It is loaded ONCE when the FastAPI application starts.
 #
-# ARCHITECTURE NOTES
-# -------------------
-#   - This file is DELIBERATELY separate from
-#     configs/training_config.yaml. Training config changes every
-#     experiment; this file changes far less often (mostly when you
-#     promote a new "best" checkpoint to be the one actually served,
-#     or when you tune the low-stock threshold based on real usage).
-#     Different lifecycles, different owners in a real team — hence
-#     two files, not one shared config.
-#   - model_path below is a PLACEHOLDER. There is no trained
-#     checkpoint yet at project-scaffold time — you must update this
-#     value yourself once docs/SDP.md Day 7-10's training/model
-#     selection is complete and you know the actual path (or
-#     Hugging Face Hub repo id, if you push checkpoints there) of
-#     your best checkpoint.
-#
-# TODO (values you MUST revisit — these are not safe defaults)
-# ------------------------------------------------------------------
-#   - [ ] model_path: currently a placeholder
-#         ("models/checkpoints/REPLACE_ME") — update this to your
-#         actual best checkpoint's path (docs/SDP.md Day 10
-#         milestone: "best model selected") before
-#         backend/repositories/model_repository.py's load_model()
-#         will find anything real to load.
-#   - [ ] confidence_threshold: 0.5 is a reasonable starting point,
-#         but per docs/SDP.md Section 11's discussion of
-#         precision/recall tradeoffs, you should tune this based on
-#         your own error analysis (Day 10) — a lower threshold
-#         favors recall (fewer missed products, more false
-#         positives); a higher threshold favors precision (fewer
-#         false positives, more risk of under-counting).
-#   - [ ] low_stock_threshold: 0.6 (meaning "below 60% of baseline
-#         counts as low stock") is a starting guess, not a
-#         data-driven value — this is a genuine PRODUCT decision
-#         (see backend/services/inventory.py's Hints section) you
-#         should revisit once you can look at real detection counts
-#         on real shelf photos.
-#
-# HINTS
-# -----
-#   - image_size below should match configs/training_config.yaml's
-#     image_size — src/inference/inference.py's preprocessing must
-#     use the same resize target the model was trained on, or you
-#     will see silently degraded accuracy (see that file's Common
-#     Mistakes section).
-#
-# COMMON MISTAKES
-# ----------------
-#   - Leaving model_path as the placeholder value and being confused
-#     when backend/repositories/model_repository.py's load_model()
-#     fails — this is expected and intentional until you've actually
-#     trained a model and updated this file.
-#
-# BEST PRACTICES
-# ---------------
-#   - When you DO update model_path after training, also note in
-#     experiments/experiment_log.md which experiment/run produced
-#     the checkpoint you promoted here, so you can always trace a
-#     deployed model back to the training run that created it.
+# Changing this file changes inference behavior WITHOUT changing code.
+# ============================================================================
 
-model_path: "models/checkpoints/REPLACE_ME"
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+
+# Path to the trained model checkpoint.
+# Update this after selecting your best model.
+model_path: "models/checkpoints/best_model"
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
+
+# Image size used during inference.
+# MUST match the image_size used during training.
 image_size: 640
-confidence_threshold: 0.5
-low_stock_threshold: 0.6
+
+# ---------------------------------------------------------------------------
+# Detection
+# ---------------------------------------------------------------------------
+
+# Minimum confidence score required for a prediction.
+confidence_threshold: 0.50
+
+# Maximum number of detections returned per image.
+max_detections: 300
+
+# Non-Maximum Suppression (NMS) threshold.
+# Used to remove duplicate overlapping boxes.
+nms_threshold: 0.50
+
+# ---------------------------------------------------------------------------
+# Inventory
+# ---------------------------------------------------------------------------
+
+# Product considered low stock below this percentage.
+low_stock_threshold: 0.60
+
+# ---------------------------------------------------------------------------
+# Device
+# ---------------------------------------------------------------------------
+
+# auto | cuda | cpu
+device: "auto"
+
+# ---------------------------------------------------------------------------
+# Visualization
+# ---------------------------------------------------------------------------
+
+# Draw bounding boxes.
+draw_boxes: true
+
+# Draw class labels.
+draw_labels: true
+
+# Draw confidence scores.
+draw_scores: true
+
+# Bounding box thickness.
+box_thickness: 2
+
+# Text size.
+font_scale: 0.6
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+# Save annotated image.
+save_prediction_image: true
+
+# Save prediction JSON.
+save_prediction_json: true
+
+# Output directory.
+output_dir: "outputs/predictions"
+
+# ---------------------------------------------------------------------------
+# Performance
+# ---------------------------------------------------------------------------
+
+# Use FP16 during inference if GPU supports it.
+fp16: true
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+verbose: true

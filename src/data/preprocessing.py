@@ -75,10 +75,7 @@ def format_annotations_for_processor(
         segmentation masks are ever added), and "iscrowd" (always 0
         — we have no crowd/group annotations).
 
-    Raises:
-        ValueError: If boxes and labels have different lengths, or
-            if any bbox is not a 4-element list of numeric values
-            with non-negative x/y and positive width/height.
+
     """
     if len(boxes) != len(labels):
         raise ValueError(
@@ -145,13 +142,6 @@ def preprocess_batch(
         A dict with "pixel_values" and "labels" keys, in the shape
         the Hugging Face Trainer / RT-DETR model expects.
 
-    Raises:
-        ValueError: If the batch's "image", "image_id", and
-            "annotations" lists have mismatched lengths (indicates a
-            corrupted batch upstream — fail loudly here rather than
-            silently misaligning images with the wrong annotations),
-            or if any individual annotation is malformed (propagated
-            from format_annotations_for_processor).
     """
     images = examples["image"]
     image_ids = examples["image_id"]

@@ -4,128 +4,31 @@ src.inference.inference
 RESPONSIBILITY
 --------------
 Runs object detection on a single image using an already-loaded
-RT-DETR model, and (optionally) draws the resulting bounding boxes
-onto the image for visualization. This is the ONE place raw
-model-in, boxes-out logic lives — backend/routes/detect.py and
-backend/routes/report.py both call into this module rather than
-duplicating the forward-pass + post-processing logic each.
-
-PURPOSE
--------
-This file is what backend/routes/detect.py's TODO explicitly points
-to (see that file's module docstring, step 3: "call
-src.inference.inference.run_inference"). Implementing it correctly
-here, once, means both API endpoints (and any future CLI/batch
-tooling you build) share identical, consistent inference behavior.
+RT-DETR model, and draws the resulting bounding boxes onto the image
+for visualization. This is the ONE place raw model-in, boxes-out
+logic lives — backend/routes/detect.py and backend/routes/report.py
+both call into this module rather than duplicating the forward-pass
++ post-processing logic each.
 
 ARCHITECTURE NOTES
 -------------------
-    • run_inference() should reuse the SAME image preprocessing path
-      used during training (src/data/preprocessing.py's
-      get_image_processor(), and ideally get_eval_transforms() from
-      src/data/augmentations.py for the deterministic resize) —
-      training/inference preprocessing mismatch is one of the most
-      common silent sources of degraded real-world accuracy (see
-      src/data/preprocessing.py's module docstring for more on this).
-    • This module must remain importable and runnable with ZERO
-      FastAPI dependency (see this package's __init__.py).
-    • draw_boxes_on_image() is the one legitimate use of OpenCV in
-      this project (per docs/SDP.md Section 13's tech stack table:
-      "OpenCV ... inference-time only, NOT annotation").
-
-ASCII FLOW DIAGRAM
--------------------
-    PIL.Image (from an uploaded file, decoded by backend/routes/detect.py)
-            |
-            v
-    preprocess_image(image, image_processor)   <- YOU implement this
-            |   (reuses src/data/preprocessing.py's conversion logic —
-            |    do NOT reimplement it here)
-            v
-    model(**inputs)   (forward pass — this part is trivial once
-                        preprocessing is correct)
-            |
-            v
-    image_processor.post_process_object_detection(...)
-            |
-            v
-    run_inference() returns: list[{"x_min":.., "y_min":.., "x_max":..,
-                                    "y_max":.., "confidence":.., "label":..}]
-            |
-            v
-    (optional) draw_boxes_on_image(image, detections) -> annotated PIL.Image
-
-TODO
-----
-    - [ ] Implement preprocess_image(image, image_processor):
-          Reuse src.data.preprocessing's conversion approach, but
-          note there are no ground-truth annotations at inference
-          time — this is a simpler, annotation-free preprocessing
-          path (image only, no boxes to convert), NOT a call to
-          preprocess_batch() (which expects annotations).
-    - [ ] Implement run_inference(image, model, image_processor,
-          confidence_threshold=0.5):
-          1. Call preprocess_image() to get model-ready tensors
-          2. Run model(**inputs) (remember: model must already be in
-             .eval() mode — that's ModelRepository's responsibility,
-             not this function's, but double-check it if you see odd
-             results)
-          3. Call image_processor.post_process_object_detection()
-             with the ORIGINAL (pre-resize) image size, so returned
-             boxes are in original-image pixel coordinates, not
-             resized-image coordinates — this is a very common bug
-          4. Filter by confidence_threshold
-          5. Return a list of dicts matching backend/schemas.py's
-             BoundingBox field names exactly (x_min, y_min, x_max,
-             y_max, confidence, label) so the route layer can
-             construct BoundingBox instances directly without any
-             reshaping
-    - [ ] Implement draw_boxes_on_image(image, detections):
-          Use OpenCV (cv2.rectangle, cv2.putText) or PIL's
-          ImageDraw — either is fine, but be consistent — to draw
-          each detection's box and confidence score onto a copy of
-          the original image. Return a NEW image; do not mutate the
-          input in place.
-
-HINTS
------
-    - `image_processor.post_process_object_detection(outputs,
-      target_sizes=[(original_height, original_width)],
-      threshold=confidence_threshold)` is the standard call —
-      target_sizes is what maps boxes back to original image
-      coordinates; get this wrong and every box will be scaled
-      incorrectly.
-    - Test this function on one known image with a hand-verified
-      expected detection before wiring it into the API end to end.
-
-COMMON MISTAKES
-----------------
-    - Returning boxes in RESIZED-image coordinates instead of
-      ORIGINAL-image coordinates — target_sizes in
-      post_process_object_detection is what prevents this; skipping
-      it is a very easy mistake to make and produces boxes that look
-      "almost right but scaled wrong" when drawn.
-    - Forgetting model.eval() / torch.no_grad() context around the
-      forward pass — impacts both correctness (dropout/batchnorm
-      behavior) and unnecessary memory usage from tracked gradients
-      you'll never use at inference time.
-
-BEST PRACTICES
----------------
-    - Keep this module's return shape (list of plain dicts with
-      exact field names matching BoundingBox) stable — it is the
-      informal "contract" between this module and the backend route
-      layer.
-
-LEARNING NOTES
---------------
-Once implemented, compare this file's preprocessing path against
-src/data/preprocessing.py's — they should be doing conceptually the
-same image transform (resize + normalize), just with training-only
-concerns (augmentation, annotation formatting) stripped out. If they
-diverge in HOW they resize/normalize, that mismatch will show up as
-a real, hard-to-diagnose accuracy gap between your reported training
-metrics and real-world demo performance.
+    • preprocess_image() and run_inference() reuse
+      src/data/preprocessing.py's get_image_processor() — the same
+      AutoImageProcessor instance used during training — so
+      training/inference preprocessing never silently diverges.
+    • This module has ZERO FastAPI dependency, by design (see this
+      package's __init__.py).
+    • draw_boxes_on_image() uses OpenCV, per docs/SDP.md Section 13's
+      tech stack table: "OpenCV ... inference-time only, NOT
+      annotation" — this is that one legitimate use.
+    • run_inference() moves inputs to whatever device the model is
+      already on (CPU or GPU) — this isn't explicitly called out in
+      the original TODO, but is necessary for correctness: if the
+      model was loaded onto a GPU (common after Colab training) and
+      inputs stay on CPU, the forward pass raises a device-mismatch
+      error. Device placement is inferred from the model itself
+      rather than hardcoded, so this works identically in either
+      environment with no config needed.
 
 REFERENCES
 ----------
@@ -133,6 +36,11 @@ REFERENCES
 """
 
 from typing import Any
+
+import cv2
+import numpy as np
+import torch
+from PIL import Image as PILImage
 
 
 def preprocess_image(image: Any, image_processor: Any) -> dict:
@@ -146,11 +54,11 @@ def preprocess_image(image: Any, image_processor: Any) -> dict:
     Returns:
         A dict of model-ready tensors (at minimum "pixel_values"),
         suitable for passing directly to the model's forward call.
-
-    Raises:
-        NotImplementedError: Always, until implemented.
+        Unlike src/data/preprocessing.py's preprocess_batch(), this
+        takes no `annotations` argument — there are no ground-truth
+        boxes at inference time.
     """
-    raise NotImplementedError("preprocess_image() is not implemented yet")
+    return image_processor(images=image, return_tensors="pt")
 
 
 def run_inference(
@@ -175,11 +83,59 @@ def run_inference(
         "x_min", "y_min", "x_max", "y_max" (original-image pixel
         coordinates), "confidence" (float), and "label" (str) —
         matching backend/schemas.py's BoundingBox fields exactly.
-
-    Raises:
-        NotImplementedError: Always, until implemented.
     """
-    raise NotImplementedError("run_inference() is not implemented yet")
+    original_width, original_height = image.size  # PIL: (width, height)
+    device = next(model.parameters()).device
+
+    inputs = preprocess_image(image, image_processor)
+    inputs = {key: value.to(device) for key, value in inputs.items()}
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    # target_sizes maps boxes back to ORIGINAL image coordinates, not
+    # resized-image coordinates -- skipping this is the most common
+    # bug here (see this module's earlier docstring notes).
+    target_sizes = torch.tensor([[original_height, original_width]], device=device)
+
+    # threshold is applied by the processor itself -- no separate
+    # manual filtering step needed afterward.
+    results = image_processor.post_process_object_detection(
+        outputs,
+        target_sizes=target_sizes,
+        threshold=confidence_threshold,
+    )[
+        0
+    ]  # batch of 1 -> take the single image's result
+
+    id2label = getattr(model.config, "id2label", {}) or {}
+
+    def _label_name(label_id: int) -> str:
+        # id2label keys may be int or str depending on how the config
+        # was loaded/serialized -- check both rather than assuming.
+        if label_id in id2label:
+            return id2label[label_id]
+        if str(label_id) in id2label:
+            return id2label[str(label_id)]
+        return str(label_id)
+
+    detections = []
+    for box, score, label_id in zip(
+        results["boxes"], results["scores"], results["labels"]
+    ):
+        x_min, y_min, x_max, y_max = box.tolist()
+        detections.append(
+            {
+                "x_min": x_min,
+                "y_min": y_min,
+                "x_max": x_max,
+                "y_max": y_max,
+                "confidence": float(score),
+                "label": _label_name(int(label_id)),
+            }
+        )
+
+    return detections
 
 
 def draw_boxes_on_image(image: Any, detections: list[dict]) -> Any:
@@ -190,12 +146,51 @@ def draw_boxes_on_image(image: Any, detections: list[dict]) -> Any:
         detections: Output of run_inference().
 
     Returns:
-        A NEW PIL.Image (or numpy array, if you choose to work in
-        OpenCV's native format) with each detection's box and
-        confidence score drawn on top. The input image must not be
-        mutated.
-
-    Raises:
-        NotImplementedError: Always, until implemented.
+        A NEW PIL.Image with each detection's box and confidence
+        score drawn on top. The input image is not mutated.
     """
-    raise NotImplementedError("draw_boxes_on_image() is not implemented yet")
+    # OpenCV works in BGR; convert once, draw, convert back -- this
+    # keeps color tuples below meaning what they say (green box), not
+    # silently swapped to blue/red because of channel-order confusion.
+    image_rgb = np.array(image.convert("RGB"))
+    image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR).copy()
+
+    box_color = (60, 179, 30)  # BGR
+    text_color = (255, 255, 255)
+
+    for detection in detections:
+        x_min = int(round(detection["x_min"]))
+        y_min = int(round(detection["y_min"]))
+        x_max = int(round(detection["x_max"]))
+        y_max = int(round(detection["y_max"]))
+        label = detection.get("label", "object")
+        confidence = detection.get("confidence", 0.0)
+
+        cv2.rectangle(image_bgr, (x_min, y_min), (x_max, y_max), box_color, thickness=2)
+
+        caption = f"{label} {confidence:.2f}"
+        (text_w, text_h), baseline = cv2.getTextSize(
+            caption, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+        )
+        label_top = max(y_min - text_h - baseline - 4, 0)
+
+        cv2.rectangle(
+            image_bgr,
+            (x_min, label_top),
+            (x_min + text_w + 4, label_top + text_h + baseline + 4),
+            box_color,
+            thickness=-1,
+        )
+        cv2.putText(
+            image_bgr,
+            caption,
+            (x_min + 2, label_top + text_h + 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            text_color,
+            1,
+            cv2.LINE_AA,
+        )
+
+    annotated_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    return PILImage.fromarray(annotated_rgb)

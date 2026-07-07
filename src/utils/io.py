@@ -55,7 +55,7 @@ from typing import Any
 def load_json(path: str) -> Any:
     """Load and parse a JSON file.
 
-    Fully implemented.
+
 
     Args:
         path: Path to a JSON file.
@@ -94,7 +94,7 @@ def save_json(data: Any, path: str) -> None:
 def load_image(path: str) -> Any:
     """Load an image file as a consistent RGB-mode PIL.Image.
 
-    Fully implemented.
+
 
     Args:
         path: Path to an image file.
@@ -117,7 +117,7 @@ def load_image(path: str) -> Any:
 def ensure_dir(path: str) -> Path:
     """Ensure a directory exists, creating parent directories as needed.
 
-    Fully implemented.
+
 
     Args:
         path: Directory path to create if it doesn't already exist.

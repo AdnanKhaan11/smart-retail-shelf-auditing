@@ -10,6 +10,10 @@ matplotlib>=3.8.0
 huggingface_hub>=0.24.0
 pyyaml>=6.0.1
 
+torchvision>=0.19.0
+accelerate>=1.1.0
+faster-coco-eval
+
 # --- Backend / serving ---
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0

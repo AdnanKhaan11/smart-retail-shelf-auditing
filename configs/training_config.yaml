@@ -1,76 +1,103 @@
-# ====================================================================
-# training_config.yaml
-# ====================================================================
+# ============================================================================
+# RT-DETR Training Configuration
+# ============================================================================
 #
-# RESPONSIBILITY
-# --------------
-# Single source of truth for every hyperparameter and path used by
-# one RT-DETR fine-tuning run (src/training/train.py, via
-# src/training/config.py's load_config()). Nothing in train.py
-# should ever hardcode a value that belongs here instead.
+# This file contains every configurable parameter used during model training.
+# train.py should NEVER hardcode these values.
 #
-# ARCHITECTURE NOTES
-# -------------------
-#   - Field names below are written to match
-#     src/training/config.py's TrainingConfig dataclass field
-#     names EXACTLY. If you rename a field in one place, rename it
-#     here too, or load_config()'s straightforward
-#     `TrainingConfig(**raw_dict)` unpacking (see that file's Hints
-#     section) will break.
-#   - Keep this file under version control (it's small, text-based,
-#     and part of what makes an experiment reproducible) — unlike
-#     models/checkpoints/, which is gitignored.
-#
-# TODO (values you should revisit before/after your first real run)
-# ---------------------------------------------------------------------
-#   - [ ] train_manifest / val_manifest: confirm these paths match
-#         whatever you actually produced in docs/SDP.md Day 6 (split
-#         creation) — the paths below assume the standard layout from
-#         that section, but double check before your first run.
-#   - [ ] batch_size: the value below (8) is a reasonable starting
-#         point for a free-tier Colab GPU (~16GB VRAM) with RT-DETR;
-#         adjust up/down based on the out-of-memory errors (or lack
-#         thereof) you actually see.
-#   - [ ] num_epochs: 10 is a deliberately SMALL baseline value (see
-#         docs/SDP.md Day 7 — "get a fast baseline first, then
-#         optimize" on Day 9). Increase this for your final training
-#         run, not your first one.
-#   - [ ] output_dir: confirm this matches where
-#         backend/repositories/model_repository.py's model_path
-#         will look for the checkpoint once training is done — these
-#         two configs (training_config.yaml here, and
-#         inference_config.yaml) need to agree with each other, but
-#         are intentionally two SEPARATE files because they have
-#         different lifecycles (see this file's header note above).
-#
-# HINTS
-# -----
-#   - If you add a new field to TrainingConfig in
-#     src/training/config.py, add the matching key here too — the
-#     dataclass's defaults will silently be used otherwise, which may
-#     not be what you intended for a specific experiment.
-#
-# COMMON MISTAKES
-# ----------------
-#   - Editing a hyperparameter value directly inside train.py "just
-#     to test something quickly" instead of here — see
-#     src/training/config.py's Common Mistakes section for why this
-#     specifically undermines the reproducibility of your
-#     experiments/experiment_log.md entries.
-#
-# BEST PRACTICES
-# ---------------
-#   - Copy this file (e.g. to experiments/run_003_config.yaml) before
-#     a significant experiment so you have an exact, timestamped
-#     record of what config produced which checkpoint — don't rely
-#     on Git history alone to reconstruct this later.
+# Changing this file changes the training behavior without touching code.
+# ============================================================================
 
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+
+# Hugging Face model checkpoint to fine-tune.
 model_checkpoint: "PekingU/rtdetr_v2_r50vd"
+
+# ---------------------------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------------------------
+
+# COCO-format annotation file for training images.
 train_manifest: "data/splits/train.json"
+
+# COCO-format annotation file for validation images.
 val_manifest: "data/splits/val.json"
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
+
+# Input image size.
+# Images are resized to 640×640 before entering the model.
 image_size: 640
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+# Number of images processed in one forward/backward pass.
 batch_size: 8
+
+# Number of complete passes through the dataset.
 num_epochs: 10
+
+# Optimizer learning rate.
 learning_rate: 0.0001
-output_dir: "models/checkpoints"
+
+# Random seed for reproducibility.
 seed: 42
+
+# ---------------------------------------------------------------------------
+# Checkpoints
+# ---------------------------------------------------------------------------
+
+# Directory where checkpoints will be saved.
+output_dir: "models/checkpoints"
+
+# ---------------------------------------------------------------------------
+# Data Loading
+# ---------------------------------------------------------------------------
+
+# Number of CPU workers used by DataLoader.
+num_workers: 2
+
+# Keep workers alive between epochs.
+persistent_workers: true
+
+# Faster GPU transfer.
+pin_memory: true
+
+
+weight_decay: 0.0001
+max_grad_norm: 0.1
+
+scheduler: "cosine"
+warmup_steps: 500
+
+
+# Faster training on GPU.
+fp16: true
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+# Validate every N epochs.
+eval_every: 1
+
+# Save checkpoint every N epochs.
+save_every: 1
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+log_every: 10
+
+# ---------------------------------------------------------------------------
+# Resume Training
+# ---------------------------------------------------------------------------
+
+resume_from_checkpoint: null

@@ -255,6 +255,10 @@ def compute_detection_metrics(
             f"{len(targets)} targets."
         )
 
+    import os
+
+    os.environ.setdefault("MPLBACKEND", "Agg")
+
     from torchmetrics.detection import MeanAveragePrecision
 
     metric = MeanAveragePrecision(

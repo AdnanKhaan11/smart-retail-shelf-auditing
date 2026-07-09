@@ -256,8 +256,7 @@ def compute_detection_metrics(
         )
 
     import os
-
-    os.environ.setdefault("MPLBACKEND", "Agg")
+    os.environ["MPLBACKEND"] = "Agg"
 
     from torchmetrics.detection import MeanAveragePrecision
 

@@ -30,7 +30,9 @@ class TrainingConfig:
         num_epochs: Number of full passes over the training set.
             Must be positive.
         learning_rate: Optimizer learning rate. Must be positive.
-        output_dir: Directory checkpoints are written to.
+        output_dir: Directory checkpoints are written to. Should be
+            LOCAL disk (e.g. /content/checkpoints on Colab), not a
+            Drive-mounted path -- see drive_sync_dir below for why.
         seed: Random seed for reproducibility.
         num_workers: Number of CPU worker processes for the
             DataLoader. Must be >= 0.
@@ -55,6 +57,18 @@ class TrainingConfig:
         resume_from_checkpoint: Optional explicit checkpoint path.
             If set, overrides auto-detection of the last checkpoint
             in output_dir. Leave null for normal auto-detect behavior.
+        drive_sync_dir: Optional Drive path. If set, build_trainer()
+            attaches a callback that copies each completed LOCAL
+            checkpoint here after every save. This exists because
+            writing checkpoints directly to a Drive-mounted path
+            proved unreliable: model.safetensors and optimizer.pt
+            were silently missing from every checkpoint across an
+            entire 25-epoch run when Trainer wrote straight to Drive
+            -- Drive's mount doesn't reliably support the
+            write-then-rename pattern Trainer uses for large files.
+            Only the LATEST checkpoint is kept on Drive (previous
+            synced checkpoint is replaced each time), to respect
+            limited Drive storage.
     """
 
     model_checkpoint: str = "PekingU/rtdetr_v2_r50vd"
@@ -62,7 +76,7 @@ class TrainingConfig:
     val_manifest: str = "data/splits/val.json"
     image_size: int = 640
     batch_size: int = 8
-    num_epochs: int = 10
+    num_epochs: int = 25
     learning_rate: float = 1e-4
     output_dir: str = "models/checkpoints"
     seed: int = 42
@@ -70,7 +84,7 @@ class TrainingConfig:
     persistent_workers: bool = True
     pin_memory: bool = True
     weight_decay: float = 1e-4
-    max_grad_norm: float = 0.1
+    max_grad_norm: float = 1.0
     scheduler: str = "cosine"
     warmup_steps: int = 500
     fp16: bool = True
@@ -78,6 +92,7 @@ class TrainingConfig:
     save_every: int = 1
     log_every: int = 10
     resume_from_checkpoint: str | None = None
+    drive_sync_dir: str | None = None
 
     def __post_init__(self) -> None:
         """Validate types and value ranges after construction.
@@ -154,6 +169,12 @@ class TrainingConfig:
             raise TypeError(
                 f"resume_from_checkpoint must be null or a string path, "
                 f"got {type(self.resume_from_checkpoint).__name__}"
+            )
+
+        if self.drive_sync_dir is not None and not isinstance(self.drive_sync_dir, str):
+            raise TypeError(
+                f"drive_sync_dir must be null or a string path, "
+                f"got {type(self.drive_sync_dir).__name__}"
             )
 
 

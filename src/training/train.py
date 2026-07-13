@@ -8,19 +8,19 @@ build the model, configure the Hugging Face Trainer, run training,
 resume automatically from the last checkpoint if one exists, and run
 a standalone, verified evaluation pass at the end.
 
-VERIFIED (confirmed against a real run, see conversation history for
-the actual smoke-test output that proved each of these)
-------------------------------------------------------------------
-    1. _get_configured_image_processor()'s `.size` override -- confirmed
-       working: assigning a plain dict to `.size` correctly changes
-       the processor's actual resize behavior (verified: a real
-       RTDetrImageProcessor resized a test image to the overridden
-       size, not the default).
-    2. compute_metrics()'s assumed EvalPrediction shape is NOT relied
-       on by main(); main() uses evaluate_on_dataset() instead, which
-       only depends on functions already unit-tested in
-       src/eval/evaluate.py, and has been confirmed working end-to-end
-       via a real smoke-test training run.
+CHECKPOINT STORAGE -- IMPORTANT LESSON LEARNED
+--------------------------------------------------
+config.output_dir should be a LOCAL disk path (e.g. /content/checkpoints
+on Colab), NOT a Drive-mounted path. Writing Trainer checkpoints
+directly to Drive was tried and failed: across an entire 25-epoch run,
+model.safetensors and optimizer.pt (the two largest files) were
+silently missing from every single checkpoint, while small metadata
+files (config.json, scheduler.pt, etc.) always succeeded. Drive's
+mount does not reliably support the write-then-rename pattern Trainer
+uses for large files. Instead, set config.drive_sync_dir -- after each
+local checkpoint completes, SyncCheckpointToDriveCallback copies the
+already-verified-complete local checkpoint folder to Drive as a
+simple file copy, which does not have this problem.
 
 ARCHITECTURE NOTES
 -------------------
@@ -34,22 +34,21 @@ ARCHITECTURE NOTES
       preprocess_batch()'s output into the dataset's Arrow-backed
       storage -- and Arrow silently converts torch.Tensor objects
       into plain nested Python lists on write, which breaks RT-DETR's
-      forward pass deep inside the model (a real bug hit and fixed
-      during development: 'list' object has no attribute 'device').
-      with_transform() instead applies the function fresh, on every
-      single access, so the tensors it returns stay real tensors.
-      This matches Hugging Face's own official object detection
-      guide, which does the same for exactly this reason.
+      forward pass deep inside the model. with_transform() instead
+      applies the function fresh, on every single access, so the
+      tensors it returns stay real tensors. Augmentation is ALSO done
+      inside this same lazy transform (not via a separate map() call)
+      -- augmenting via map() previously hit a real ArrowMemoryError
+      (a 2GB single-chunk limit) when writing 4000+ augmented images
+      to Arrow storage. Doing both augmentation and preprocessing
+      lazily, per-batch, avoids writing any image data to Arrow at
+      all.
     • Two different "val dataset" representations exist on purpose:
       the Trainer-ready one (fully processor-encoded, used only for
       Trainer's built-in eval_loss tracking) and a separate raw
       (augmented-but-not-processor-encoded) one built by
       _build_raw_eval_dataset(), used for the real, verified
       mAP/precision/recall/F1 numbers via evaluate_on_dataset().
-      Running the forward pass twice is a deliberate, acceptable
-      tradeoff for this project's dataset scale -- see
-      compute_metrics()'s docstring for why we don't trust Trainer's
-      own compute_metrics wiring.
     • fp16 is only meaningful (and only valid) on a CUDA GPU --
       requesting it on CPU-only hardware raises an error rather than
       silently doing nothing, so build_trainer() resolves this
@@ -59,48 +58,19 @@ ARCHITECTURE NOTES
       YET wired into build_trainer() -- TrainingArguments only
       directly supports "every epoch" (what's hardcoded below) or
       step-based intervals, not "every N epochs" without extra
-      steps-per-epoch math. Reserved for a future extension if a
-      longer training run ever needs less-frequent evaluation.
+      steps-per-epoch math.
     • This file NEVER imports anything from backend/ -- training and
       serving are deliberately decoupled (docs/SDP.md Section 5).
-
-ASCII FLOW DIAGRAM
--------------------
-    load_config("configs/training_config.yaml")
-            |
-            v
-    build_datasets(config)      -> train_dataset, val_dataset (Trainer-ready)
-            |
-            v
-    build_model(config)          -> model, image_processor
-            |
-            v
-    build_trainer(...)           -> Trainer (remove_unused_columns=False)
-            |
-            v
-    resolve checkpoint (explicit config override, else auto-detect last)
-            |
-            v
-    trainer.train(resume_from_checkpoint=...)
-            |
-            v
-    save model + image_processor to config.output_dir
-            |
-            v
-    _build_raw_eval_dataset(config) -> evaluate_on_dataset(...) -> real metrics
-            |
-            v
-    _log_experiment(config, metrics) -> experiments/experiment_log.md
 
 REFERENCES
 ----------
     - https://huggingface.co/docs/transformers/main/en/model_doc/rt_detr
     - https://huggingface.co/docs/transformers/main/en/main_classes/trainer
     - https://huggingface.co/docs/transformers/tasks/object_detection
-      (official guide confirming the with_transform() pattern above)
 """
 
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -129,11 +99,61 @@ logger = get_logger(__name__)
 # This project's class taxonomy. SKU-110K is a single-class
 # density/counting dataset -- every product instance shares one
 # generic "product" label. If per-SKU/per-brand classes are added
-# later (docs/SDP.md Section 15, Future Improvements), update this
-# mapping AND retrain from scratch, since the classification head's
-# size depends on it.
+# later, update this mapping AND retrain from scratch.
 ID2LABEL = {0: "product"}
 LABEL2ID = {"product": 0}
+
+
+class SyncCheckpointToDriveCallback:
+    """After each LOCAL checkpoint save completes, copy it to Drive.
+
+    See this module's "CHECKPOINT STORAGE" note for why this exists:
+    Trainer writing directly to a Drive-mounted output_dir silently
+    dropped the largest files (model.safetensors, optimizer.pt) on
+    every save across an entire run. Training to local disk and then
+    copying the already-complete folder to Drive avoids that failure
+    mode entirely.
+
+    Only the LATEST synced checkpoint is kept on Drive (the previous
+    one is deleted before copying the new one), to respect limited
+    Drive storage -- if you need multiple historical checkpoints on
+    Drive, increase this class's scope accordingly.
+    """
+
+    def __init__(self, drive_dir: str):
+        """Store the Drive destination directory.
+
+        Args:
+            drive_dir: Path (typically under /content/drive/MyDrive/...)
+                to sync the latest local checkpoint to.
+        """
+        self.drive_dir = Path(drive_dir)
+
+    def on_save(self, args, state, control, **kwargs):
+        """Hugging Face Trainer callback hook, fired after each checkpoint save.
+
+        Args:
+            args: The TrainingArguments in use (provides output_dir).
+            state: The TrainerState (provides global_step, used to
+                find the just-saved checkpoint folder's name).
+            control: The TrainerControl object (returned unmodified).
+            **kwargs: Other values Trainer passes to callbacks, unused.
+
+        Returns:
+            The same control object, unmodified -- this callback only
+            performs a side effect (copying files), it never changes
+            training control flow.
+        """
+        local_checkpoint_dir = Path(args.output_dir) / f"checkpoint-{state.global_step}"
+        if not local_checkpoint_dir.exists():
+            return control
+
+        if self.drive_dir.exists():
+            shutil.rmtree(self.drive_dir)
+        shutil.copytree(local_checkpoint_dir, self.drive_dir)
+        print(f"Synced checkpoint-{state.global_step} to Drive at {self.drive_dir}")
+
+        return control
 
 
 def _get_configured_image_processor(config: TrainingConfig) -> Any:
@@ -178,18 +198,11 @@ def build_model(config: TrainingConfig) -> tuple[Any, Any]:
 
 
 def _preprocess_and_unbatch(examples: dict, image_processor: Any) -> dict:
-    """Adapt preprocess_batch's batch-stacked output for dataset.with_transform().
-
-    preprocess_batch() (src/data/preprocessing.py) returns
-    {"pixel_values": Tensor[B, C, H, W], "labels": [dict, ...]} -- a
-    single stacked tensor for the whole batch. datasets' with_transform
-    (like map(batched=True)) instead expects a dict of LISTS, one entry
-    per row. This function does that unbinding -- it is glue code
-    specific to how this project wires src/data/preprocessing.py into
-    a Hugging Face Dataset, not duplicate logic.
+    """Adapt preprocess_batch's batch-stacked output for with_transform().
 
     Args:
-        examples: A batch dict, as passed by dataset.with_transform().
+        examples: A batch dict (dict of lists), as passed by
+            dataset.with_transform().
         image_processor: An AutoImageProcessor instance.
 
     Returns:
@@ -211,15 +224,13 @@ def _augment_and_preprocess(
 
     apply_transforms() (src/data/augmentations.py) operates on ONE
     example at a time, but with_transform() always calls its callback
-    with a BATCHED dict (one list per column) -- this function bridges
-    that gap: unbatches, augments each example individually, then
-    re-batches for preprocess_batch(). Critically, nothing here ever
-    gets written to Arrow storage -- it's recomputed fresh on every
-    access, which is both what fixes the 2GB Arrow chunk overflow
-    (previously hit when build_datasets() used .map() to permanently
-    write every augmented image to disk-backed storage) and what
-    correctly gives every epoch a fresh random augmentation, rather
-    than reusing one cached augmented version forever.
+    with a BATCHED dict (one list per column) -- this function
+    bridges that gap: unbatches, augments each example individually,
+    then re-batches for preprocess_batch(). Nothing here is ever
+    written to Arrow storage -- it's recomputed fresh on every access,
+    which fixes both a prior tensor-to-list Arrow coercion bug and a
+    2GB Arrow chunk overflow, and correctly gives every epoch a fresh
+    random augmentation.
 
     Args:
         examples: A batched dict ("image", "image_id", "annotations"
@@ -258,10 +269,7 @@ def build_datasets(config: TrainingConfig) -> tuple[Any, Any]:
 
     Both augmentation and preprocessing are applied lazily via
     with_transform() -- never via map() -- so image data is never
-    written to the dataset's Arrow storage (avoiding both the 2GB
-    Arrow chunk limit and the earlier tensor-to-list Arrow round-trip
-    bug). Each access re-augments and re-preprocesses fresh, which is
-    also the correct behavior for randomized training-time augmentation.
+    written to the dataset's Arrow storage.
 
     Args:
         config: Resolved TrainingConfig, used for config.train_manifest,
@@ -293,11 +301,6 @@ def build_datasets(config: TrainingConfig) -> tuple[Any, Any]:
 
 def _build_raw_eval_dataset(config: TrainingConfig) -> Any:
     """Build the val split for standalone metric computation (not for the Trainer).
-
-    Uses with_transform() (not map()) for the same reason as
-    build_datasets() -- avoids writing augmented image data to Arrow
-    storage. Stops after augmentation only -- boxes stay in COCO XYWH
-    format, matching what evaluate_on_dataset() expects.
 
     Args:
         config: Resolved TrainingConfig.
@@ -341,24 +344,17 @@ def evaluate_on_dataset(
 ) -> dict[str, float]:
     """Run a manual forward-pass evaluation loop and compute real detection metrics.
 
-    This is the reliable evaluation path this project actually uses
-    (see compute_metrics()'s docstring for why its Trainer-wired
-    alternative is not trusted by default). Reuses src/eval/evaluate.py's
-    already-tested functions directly -- no Trainer internals involved.
-
     Args:
         model: The trained model, in eval mode.
         image_processor: The matching, size-configured image processor.
-        raw_eval_dataset: Output of _build_raw_eval_dataset() -- NOT
-            build_datasets()'s Trainer-ready val_dataset.
+        raw_eval_dataset: Output of _build_raw_eval_dataset().
         batch_size: Number of images per forward-pass batch.
         confidence_threshold: Minimum confidence for a detection to
             count as a prediction.
 
     Returns:
         A dict with keys "map", "map_50", "map_50_95", "precision",
-        "recall", "f1" (see src/eval/evaluate.py's
-        compute_detection_metrics for definitions).
+        "recall", "f1".
     """
     device = next(model.parameters()).device
     model.eval()
@@ -379,12 +375,6 @@ def evaluate_on_dataset(
         with torch.no_grad():
             raw_outputs = model(**inputs)
 
-        # Images here were already resized to config.image_size by
-        # get_eval_transforms() (via _build_raw_eval_dataset), and the
-        # image_processor's own resize was forced to match that same
-        # size (_get_configured_image_processor) -- so this is the
-        # correct, single, consistent frame for both predictions and
-        # targets.
         height, width = images[0].size[1], images[0].size[0]  # PIL: (width, height)
         target_sizes = [(height, width)] * len(images)
 
@@ -405,23 +395,8 @@ def evaluate_on_dataset(
 def compute_metrics(eval_pred: Any) -> dict[str, float]:
     """Optional, experimental Trainer-wired metrics callback. NOT used by default.
 
-    Wiring torchmetrics-based detection metrics directly into the
-    Hugging Face Trainer's compute_metrics is known to be fragile
-    across transformers versions, because the Trainer's default
-    evaluation loop concatenates predictions across batches -- which
-    does not work cleanly for object detection, where each image has
-    a different number of boxes. This function assumes
-    TrainingArguments(eval_do_concat_batches=False) is set (NOT done
-    by build_trainer() by default), which changes eval_pred.predictions
-    into a list of per-batch raw outputs rather than one concatenated
-    tensor. This is provided for experimentation only -- main()'s
-    real, relied-upon metrics come from evaluate_on_dataset() instead,
-    which has no dependency on this function or on Trainer internals,
-    and has been confirmed working via a real end-to-end run.
-
     Args:
-        eval_pred: An EvalPrediction from the Trainer, assumed (see
-            above) to hold per-batch raw outputs, not concatenated ones.
+        eval_pred: An EvalPrediction from the Trainer.
 
     Returns:
         A dict of metric name to float value.
@@ -458,10 +433,6 @@ def build_trainer(
     """
     from transformers import Trainer, TrainingArguments
 
-    # fp16 is only meaningful (and only valid) on a CUDA GPU -- requesting
-    # it on CPU-only hardware (e.g. local smoke tests) raises an error
-    # rather than silently no-op'ing, so this must be resolved
-    # explicitly here, not passed straight through from config.
     use_fp16 = config.fp16 and torch.cuda.is_available()
 
     training_args = TrainingArguments(
@@ -483,24 +454,13 @@ def build_trainer(
         seed=config.seed,
         eval_strategy="epoch",
         save_strategy="epoch",
-        # Keep only the 3 most recent checkpoints -- Colab disk is
-        # limited, and we don't need every single epoch's checkpoint
-        # once training has moved past it.
         save_total_limit=3,
         load_best_model_at_end=True,
-        # eval_loss is used (not a custom detection metric) precisely
-        # because it works reliably regardless of Trainer's known
-        # fragility with variable-length detection outputs -- see
-        # compute_metrics()'s docstring.
         metric_for_best_model="eval_loss",
         greater_is_better=False,
-        # Required for object detection models: Trainer's default
-        # column-pruning inspects the model's forward signature and
-        # will incorrectly strip pixel_values/labels if this is left
-        # at its True default.
         remove_unused_columns=False,
         logging_steps=config.log_every,
-        report_to=[],  # avoid requiring wandb/etc. unless explicitly configured
+        report_to=[],
     )
 
     trainer = Trainer(
@@ -509,10 +469,11 @@ def build_trainer(
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=collate_fn,
-        # compute_metrics intentionally NOT wired here -- see that
-        # function's docstring for why. Real metrics come from
-        # evaluate_on_dataset(), called separately in main().
     )
+
+    if config.drive_sync_dir:
+        trainer.add_callback(SyncCheckpointToDriveCallback(config.drive_sync_dir))
+
     return trainer
 
 
